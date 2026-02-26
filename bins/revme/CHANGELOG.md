@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [12.0.0](https://github.com/bluealloy/revm/compare/revme-v11.0.0...revme-v12.0.0) - 2026-02-26
+
+### Added
+
+- *(revme)* add --json output flag to evmrunner command ([#3428](https://github.com/bluealloy/revm/pull/3428))
+- *(revme)* validate block gas used in blockchain tests ([#3416](https://github.com/bluealloy/revm/pull/3416))
+- *(revme)* add --omit-progress flag to statetest command ([#3419](https://github.com/bluealloy/revm/pull/3419))
+
+### Other
+
+- add subcall benchmarks (1000-call variants) ([#3427](https://github.com/bluealloy/revm/pull/3427))
+- use fixed bytes hashmaps from alloy-core ([#3358](https://github.com/bluealloy/revm/pull/3358))
+- update default hardfork to Osaka (Ethereum) and Jovian (Optimism) ([#3326](https://github.com/bluealloy/revm/pull/3326))
+
 ## [11.0.0](https://github.com/bluealloy/revm/compare/revme-v10.0.2...revme-v11.0.0) - 2026-01-15
 
 ### Added
