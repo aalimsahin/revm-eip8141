@@ -565,15 +565,15 @@ opcodes! {
     // 0xA7
     // 0xA8
     // 0xA9
-    // 0xAA
+    0xAA => APPROVE      => stack_io(3, 0), terminating;
     // 0xAB
     // 0xAC
     // 0xAD
     // 0xAE
     // 0xAF
-    // 0xB0
-    // 0xB1
-    // 0xB2
+    0xB0 => TXPARAMLOAD  => stack_io(2, 1);
+    0xB1 => TXPARAMSIZE  => stack_io(2, 1);
+    0xB2 => TXPARAMCOPY  => stack_io(5, 0);
     // 0xB3
     // 0xB4
     // 0xB5

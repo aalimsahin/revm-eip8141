@@ -26,6 +26,8 @@ pub mod system;
 pub mod tx_info;
 /// Utility functions and helpers for instruction implementation.
 pub mod utility;
+/// EIP-8141 frame transaction opcodes (APPROVE, TXPARAMLOAD, TXPARAMSIZE, TXPARAMCOPY).
+pub mod frame_tx;
 
 pub use context_interface::cfg::gas::{self, *};
 

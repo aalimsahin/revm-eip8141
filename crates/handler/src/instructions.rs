@@ -1,6 +1,9 @@
 use auto_impl::auto_impl;
 use interpreter::{
-    instructions::{instruction_table_gas_changes_spec, InstructionTable},
+    instructions::{
+        frame_tx::{self, FrameTxHost},
+        instruction_table_gas_changes_spec, InstructionTable,
+    },
     Host, Instruction, InterpreterTypes,
 };
 use primitives::hardfork::SpecId;
@@ -45,6 +48,7 @@ where
     HOST: Host,
 {
     /// Returns `EthInstructions` with mainnet spec.
+    #[deprecated(since = "0.2.0", note = "use new_mainnet_with_spec instead")]
     pub fn new_mainnet() -> Self {
         let spec = SpecId::default();
         Self::new(instruction_table_gas_changes_spec(spec), spec)
@@ -71,6 +75,27 @@ where
     }
 }
 
+impl<WIRE, HOST> EthInstructions<WIRE, HOST>
+where
+    WIRE: InterpreterTypes,
+    HOST: Host + FrameTxHost,
+{
+    /// Registers EIP-8141 frame transaction opcodes into the instruction table.
+    ///
+    /// Inserts handlers for:
+    /// - APPROVE (0xAA) — frame approval, gas cost 100
+    /// - TXPARAMLOAD (0xB0) — load tx parameter, gas cost 3
+    /// - TXPARAMSIZE (0xB1) — get parameter size, gas cost 3
+    /// - TXPARAMCOPY (0xB2) — copy parameter to memory, gas cost 3 + memory expansion
+    pub fn with_eip8141_opcodes(mut self) -> Self {
+        self.insert_instruction(0xAA, Instruction::new(frame_tx::approve, 100));
+        self.insert_instruction(0xB0, Instruction::new(frame_tx::txparamload, 3));
+        self.insert_instruction(0xB1, Instruction::new(frame_tx::txparamsize, 3));
+        self.insert_instruction(0xB2, Instruction::new(frame_tx::txparamcopy, 3));
+        self
+    }
+}
+
 impl<IT, CTX> InstructionProvider for EthInstructions<IT, CTX>
 where
     IT: InterpreterTypes,
@@ -81,15 +106,5 @@ where
 
     fn instruction_table(&self) -> &InstructionTable<Self::InterpreterTypes, Self::Context> {
         &self.instruction_table
-    }
-}
-
-impl<WIRE, HOST> Default for EthInstructions<WIRE, HOST>
-where
-    WIRE: InterpreterTypes,
-    HOST: Host,
-{
-    fn default() -> Self {
-        Self::new_mainnet()
     }
 }
