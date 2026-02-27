@@ -298,6 +298,14 @@ const fn instruction_table_impl<WIRE: InterpreterTypes, H: Host>() -> [Instructi
     table[REVERT as usize] = Instruction::new(control::revert, 0);
     table[INVALID as usize] = Instruction::new(control::invalid, 0);
     table[SELFDESTRUCT as usize] = Instruction::new(host::selfdestruct, 0);
+
+    // EIP-8141 frame transaction opcodes — placeholder handlers that return NotActivated.
+    // Real handlers are injected via `EthInstructions::with_eip8141_opcodes()`.
+    table[APPROVE as usize] = Instruction::new(control::not_activated, 0);
+    table[TXPARAMLOAD as usize] = Instruction::new(control::not_activated, 0);
+    table[TXPARAMSIZE as usize] = Instruction::new(control::not_activated, 0);
+    table[TXPARAMCOPY as usize] = Instruction::new(control::not_activated, 0);
+
     table
 }
 

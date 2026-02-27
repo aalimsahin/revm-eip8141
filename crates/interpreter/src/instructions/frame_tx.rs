@@ -394,7 +394,15 @@ pub fn txparamsize<WIRE: InterpreterTypes, H: Host + FrameTxHost + ?Sized>(
 
     let size: U256 = match param_id {
         // All scalar fields are 32 bytes
-        0x00..=0x0B | 0x10 | 0x11 | 0x13 | 0x14 | 0x15 => U256::from(32u64),
+        0x00..=0x0B | 0x10 | 0x11 | 0x13 | 0x14 => U256::from(32u64),
+        // frames[in2].status — only past frames allowed (consistent with TXPARAMLOAD)
+        0x15 => {
+            if index >= ftx.frame_count || index >= ftx.current_frame_index {
+                context.interpreter.halt(InstructionResult::InvalidFEOpcode);
+                return;
+            }
+            U256::from(32u64)
+        }
         // Frame data is dynamic
         0x12 => {
             if index >= ftx.frame_count {

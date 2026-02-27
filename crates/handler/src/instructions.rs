@@ -96,6 +96,16 @@ where
     }
 }
 
+impl<WIRE, HOST> Default for EthInstructions<WIRE, HOST>
+where
+    WIRE: InterpreterTypes,
+    HOST: Host,
+{
+    fn default() -> Self {
+        Self::new_mainnet_with_spec(SpecId::default())
+    }
+}
+
 impl<IT, CTX> InstructionProvider for EthInstructions<IT, CTX>
 where
     IT: InterpreterTypes,

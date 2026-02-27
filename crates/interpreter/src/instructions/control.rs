@@ -121,3 +121,10 @@ pub fn invalid<WIRE: InterpreterTypes, H: ?Sized>(context: InstructionContext<'_
 pub fn unknown<WIRE: InterpreterTypes, H: ?Sized>(context: InstructionContext<'_, H, WIRE>) {
     context.interpreter.halt(InstructionResult::OpcodeNotFound);
 }
+
+/// Placeholder for opcodes that are defined but not activated in this context.
+/// Used for EIP-8141 opcodes in the default instruction table; real handlers
+/// are injected via `with_eip8141_opcodes()`.
+pub fn not_activated<WIRE: InterpreterTypes, H: ?Sized>(context: InstructionContext<'_, H, WIRE>) {
+    context.interpreter.halt(InstructionResult::NotActivated);
+}
