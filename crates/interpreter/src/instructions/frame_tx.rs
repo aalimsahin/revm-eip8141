@@ -32,6 +32,10 @@ pub struct FrameTxContext {
     pub sender: Address,
 
     /// The payer address (set when payer_approved becomes true).
+    ///
+    /// Semantics:
+    /// - APPROVE scope 0x1: payer = current frame target (sponsor pattern)
+    /// - APPROVE scope 0x2: payer = sender
     pub payer: Address,
 
     /// Transaction type byte (0x06).
@@ -120,7 +124,10 @@ where
 /// Stack inputs (top first): [offset, length, scope]
 /// - offset: memory offset for return data
 /// - length: byte length of return data
-/// - scope: 0x0 = execution approval, 0x1 = payment approval, 0x2 = combined
+/// - scope:
+///   - 0x0 = execution approval (sender only)
+///   - 0x1 = payment approval (payer = current frame target)
+///   - 0x2 = combined execution+payment approval (payer = sender)
 ///
 /// Behaves like RETURN (terminates execution) but also updates transaction-scoped
 /// approval state (sender_approved / payer_approved).
@@ -180,7 +187,7 @@ pub fn approve<WIRE: InterpreterTypes, H: Host + FrameTxHost + ?Sized>(
                 context.interpreter.halt(InstructionResult::Revert);
                 return;
             }
-            // Record the payer as the current frame's target
+            // Payment approval delegates gas payment to the current frame target.
             let frame_idx = ftx.current_frame_index;
             ftx.payer = ftx.frames[frame_idx].target;
             ftx.payer_approved = true;
@@ -192,8 +199,8 @@ pub fn approve<WIRE: InterpreterTypes, H: Host + FrameTxHost + ?Sized>(
                 context.interpreter.halt(InstructionResult::Revert);
                 return;
             }
-            let frame_idx = ftx.current_frame_index;
-            ftx.payer = ftx.frames[frame_idx].target;
+            // Combined approval means sender and payer are the transaction sender.
+            ftx.payer = ftx.sender;
             ftx.sender_approved = true;
             ftx.payer_approved = true;
         }
@@ -493,8 +500,5 @@ pub fn txparamcopy<WIRE: InterpreterTypes, H: Host + FrameTxHost + ?Sized>(
     };
 
     // Copy data to memory, zero-padding if src+len exceeds data length
-    context
-        .interpreter
-        .memory
-        .set_data(dest, src, len, data);
+    context.interpreter.memory.set_data(dest, src, len, data);
 }

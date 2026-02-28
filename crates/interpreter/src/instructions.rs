@@ -12,6 +12,8 @@ pub mod block_info;
 pub mod contract;
 /// Control flow instructions (JUMP, JUMPI, REVERT, etc.).
 pub mod control;
+/// EIP-8141 frame transaction opcodes (APPROVE, TXPARAMLOAD, TXPARAMSIZE, TXPARAMCOPY).
+pub mod frame_tx;
 /// Host environment interactions (SLOAD, SSTORE, LOG, etc.).
 pub mod host;
 /// Signed 256-bit integer operations.
@@ -26,8 +28,6 @@ pub mod system;
 pub mod tx_info;
 /// Utility functions and helpers for instruction implementation.
 pub mod utility;
-/// EIP-8141 frame transaction opcodes (APPROVE, TXPARAMLOAD, TXPARAMSIZE, TXPARAMCOPY).
-pub mod frame_tx;
 
 pub use context_interface::cfg::gas::{self, *};
 
