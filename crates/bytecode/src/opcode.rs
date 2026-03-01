@@ -194,6 +194,7 @@ impl OpCode {
                 | OpCode::CALLCODE
                 | OpCode::DELEGATECALL
                 | OpCode::STATICCALL
+                | OpCode::TXPARAMCOPY
         )
     }
 
@@ -720,12 +721,12 @@ mod tests {
         for _ in OPCODE_INFO.into_iter().flatten() {
             opcode_num += 1;
         }
-        assert_eq!(opcode_num, 150);
+        assert_eq!(opcode_num, 154);
     }
 
     #[test]
     fn test_terminating_opcodes() {
-        let terminating = [REVERT, RETURN, INVALID, SELFDESTRUCT, STOP];
+        let terminating = [REVERT, RETURN, INVALID, SELFDESTRUCT, STOP, APPROVE];
         let mut opcodes = [false; 256];
         for terminating in terminating.iter() {
             opcodes[*terminating as usize] = true;

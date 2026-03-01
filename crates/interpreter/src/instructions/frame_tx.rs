@@ -70,6 +70,11 @@ pub struct FrameTxContext {
 
     /// Frame metadata for all frames.
     pub frames: Vec<FrameInfo>,
+
+    /// Set to `true` when APPROVE is successfully called during the current frame.
+    /// Reset to `false` before each VERIFY frame execution by the executor.
+    /// Used instead of the fragile approval-changed heuristic.
+    pub approve_called_current_frame: bool,
 }
 
 /// Metadata for a single frame within a frame transaction.
@@ -138,6 +143,16 @@ pub fn approve<WIRE: InterpreterTypes, H: Host + FrameTxHost + ?Sized>(
     if !context.host.frame_tx_context().active {
         context.interpreter.halt(InstructionResult::OpcodeNotFound);
         return;
+    }
+
+    // APPROVE is only valid inside a VERIFY frame (mode == 1).
+    {
+        let ftx = context.host.frame_tx_context();
+        let idx = ftx.current_frame_index;
+        if idx >= ftx.frames.len() || ftx.frames[idx].mode != 1 {
+            context.interpreter.halt(InstructionResult::InvalidFEOpcode);
+            return;
+        }
     }
 
     popn!([offset, len, scope], context.interpreter);
@@ -210,6 +225,9 @@ pub fn approve<WIRE: InterpreterTypes, H: Host + FrameTxHost + ?Sized>(
             return;
         }
     }
+
+    // Mark that APPROVE was called in this frame (for executor to check).
+    ftx.approve_called_current_frame = true;
 
     // Terminate like RETURN — set the return action
     context
@@ -400,8 +418,8 @@ pub fn txparamsize<WIRE: InterpreterTypes, H: Host + FrameTxHost + ?Sized>(
     let ftx = context.host.frame_tx_context();
 
     let size: U256 = match param_id {
-        // All scalar fields are 32 bytes
-        0x00..=0x0B | 0x10 | 0x11 | 0x13 | 0x14 => U256::from(32u64),
+        // All scalar fields are 32 bytes (0x00-0x09 match TXPARAMLOAD scalars)
+        0x00..=0x09 | 0x10 | 0x11 | 0x13 | 0x14 => U256::from(32u64),
         // frames[in2].status — only past frames allowed (consistent with TXPARAMLOAD)
         0x15 => {
             if index >= ftx.frame_count || index >= ftx.current_frame_index {
