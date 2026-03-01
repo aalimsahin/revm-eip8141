@@ -247,6 +247,12 @@ pub fn approve<WIRE: InterpreterTypes, H: Host + FrameTxHost + ?Sized>(
 /// Stack inputs (top first): [in1, in2]
 /// Stack output: [value]
 ///
+/// Parameter ID space:
+///   0x00-0x09: Transaction-level scalar parameters
+///   0x0A-0x0F: Reserved for future tx-level parameters
+///   0x10:      Current frame index (scalar)
+///   0x11-0x15: Frame-indexed parameters (require index argument)
+///
 /// Parameter table:
 /// - (0x00, 0): tx type (0x06)
 /// - (0x01, 0): nonce
@@ -418,8 +424,16 @@ pub fn txparamsize<WIRE: InterpreterTypes, H: Host + FrameTxHost + ?Sized>(
     let ftx = context.host.frame_tx_context();
 
     let size: U256 = match param_id {
-        // All scalar fields are 32 bytes (0x00-0x09 match TXPARAMLOAD scalars)
-        0x00..=0x09 | 0x10 | 0x11 | 0x13 | 0x14 => U256::from(32u64),
+        // Transaction-level scalar parameters (no index needed)
+        0x00..=0x09 | 0x10 => U256::from(32u64),
+        // Frame-indexed scalar parameters (require bounds check)
+        0x11 | 0x13 | 0x14 => {
+            if index >= ftx.frame_count {
+                context.interpreter.halt(InstructionResult::InvalidFEOpcode);
+                return;
+            }
+            U256::from(32u64)
+        }
         // frames[in2].status — only past frames allowed (consistent with TXPARAMLOAD)
         0x15 => {
             if index >= ftx.frame_count || index >= ftx.current_frame_index {
@@ -482,7 +496,10 @@ pub fn txparamcopy<WIRE: InterpreterTypes, H: Host + FrameTxHost + ?Sized>(
     let dest = as_usize_or_fail!(context.interpreter, dest_offset);
     let src = as_usize_saturated!(src_offset);
 
-    // Resize memory (charges gas)
+    // Charge per-word copy gas (3 gas per 32-byte word), matching CALLDATACOPY semantics.
+    gas!(context.interpreter, context.host.gas_params().copy_cost(len));
+
+    // Resize memory (charges expansion gas)
     if !context
         .interpreter
         .resize_memory(context.host.gas_params(), dest, len)
@@ -519,4 +536,636 @@ pub fn txparamcopy<WIRE: InterpreterTypes, H: Host + FrameTxHost + ?Sized>(
 
     // Copy data to memory, zero-padding if src+len exceeds data length
     context.interpreter.memory.set_data(dest, src, len, data);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{InstructionContext, Interpreter};
+    use context_interface::{Host, cfg::GasParams, host::LoadError};
+    use primitives::{Address, Bytes, Log, B256, U256};
+
+    // ── Test host that wraps DummyHost + FrameTxContext ──────────────────
+
+    struct TestHost {
+        gas_params: GasParams,
+        ftx: FrameTxContext,
+    }
+
+    impl TestHost {
+        fn new(ftx: FrameTxContext) -> Self {
+            Self {
+                gas_params: GasParams::default(),
+                ftx,
+            }
+        }
+    }
+
+    impl Host for TestHost {
+        fn basefee(&self) -> U256 { U256::ZERO }
+        fn blob_gasprice(&self) -> U256 { U256::ZERO }
+        fn gas_limit(&self) -> U256 { U256::ZERO }
+        fn gas_params(&self) -> &GasParams { &self.gas_params }
+        fn difficulty(&self) -> U256 { U256::ZERO }
+        fn prevrandao(&self) -> Option<U256> { None }
+        fn block_number(&self) -> U256 { U256::ZERO }
+        fn timestamp(&self) -> U256 { U256::ZERO }
+        fn beneficiary(&self) -> Address { Address::ZERO }
+        fn chain_id(&self) -> U256 { U256::ZERO }
+        fn effective_gas_price(&self) -> U256 { U256::ZERO }
+        fn caller(&self) -> Address { Address::ZERO }
+        fn blob_hash(&self, _number: usize) -> Option<U256> { None }
+        fn max_initcode_size(&self) -> usize { 0 }
+        fn block_hash(&mut self, _number: u64) -> Option<B256> { None }
+        fn selfdestruct(
+            &mut self, _address: Address, _target: Address, _skip_cold_load: bool,
+        ) -> Result<context_interface::context::StateLoad<context_interface::context::SelfDestructResult>, LoadError> {
+            Err(LoadError::DBError)
+        }
+        fn log(&mut self, _log: Log) {}
+        fn tstore(&mut self, _address: Address, _key: primitives::StorageKey, _value: primitives::StorageValue) {}
+        fn tload(&mut self, _address: Address, _key: primitives::StorageKey) -> primitives::StorageValue {
+            primitives::StorageValue::ZERO
+        }
+        fn load_account_info_skip_cold_load(
+            &mut self, _address: Address, _load_code: bool, _skip_cold_load: bool,
+        ) -> Result<context_interface::journaled_state::AccountInfoLoad<'_>, LoadError> {
+            Err(LoadError::DBError)
+        }
+        fn sstore_skip_cold_load(
+            &mut self, _address: Address, _key: primitives::StorageKey, _value: primitives::StorageValue, _skip_cold_load: bool,
+        ) -> Result<context_interface::context::StateLoad<context_interface::context::SStoreResult>, LoadError> {
+            Err(LoadError::DBError)
+        }
+        fn sload_skip_cold_load(
+            &mut self, _address: Address, _key: primitives::StorageKey, _skip_cold_load: bool,
+        ) -> Result<context_interface::context::StateLoad<primitives::StorageValue>, LoadError> {
+            Err(LoadError::DBError)
+        }
+    }
+
+    impl FrameTxHost for TestHost {
+        fn frame_tx_context(&self) -> &FrameTxContext { &self.ftx }
+        fn frame_tx_context_mut(&mut self) -> &mut FrameTxContext { &mut self.ftx }
+    }
+
+    // ── Helper to build a FrameTxContext with sensible defaults ──────────
+
+    fn make_ftx() -> FrameTxContext {
+        let target_addr = Address::new([0xAA; 20]);
+        FrameTxContext {
+            active: true,
+            sender_approved: false,
+            payer_approved: false,
+            sender: Address::new([0x11; 20]),
+            payer: Address::new([0x11; 20]),
+            tx_type: 0x06,
+            nonce: 42,
+            max_priority_fee_per_gas: 1_000_000_000,
+            max_fee_per_gas: 30_000_000_000,
+            max_fee_per_blob_gas: 100,
+            max_cost: U256::from(999_999u64),
+            blob_versioned_hashes: vec![B256::from([0xBB; 32])],
+            sig_hash: B256::from([0xCC; 32]),
+            frame_count: 3,
+            current_frame_index: 1,
+            frames: vec![
+                FrameInfo {
+                    mode: 1, // VERIFY
+                    target: target_addr,
+                    gas_limit: 100_000,
+                    data: Bytes::from_static(&[0x01, 0x02, 0x03]),
+                    status: Some(true),
+                },
+                FrameInfo {
+                    mode: 1, // VERIFY (current)
+                    target: target_addr,
+                    gas_limit: 200_000,
+                    data: Bytes::from_static(&[0xAA, 0xBB]),
+                    status: None,
+                },
+                FrameInfo {
+                    mode: 2, // SENDER
+                    target: Address::new([0x22; 20]),
+                    gas_limit: 50_000,
+                    data: Bytes::from_static(&[0xDE, 0xAD, 0xBE, 0xEF]),
+                    status: None,
+                },
+            ],
+            approve_called_current_frame: false,
+        }
+    }
+
+    /// Helper: get the instruction result (halt status) from the interpreter.
+    fn halt_result(interpreter: &mut Interpreter<crate::interpreter::EthInterpreter>) -> Option<InstructionResult> {
+        interpreter.bytecode.instruction_result()
+    }
+
+    // ── APPROVE tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn approve_only_works_in_verify_mode() {
+        // APPROVE in a DEFAULT frame (mode=0) should fail.
+        let mut ftx = make_ftx();
+        ftx.frames[1].mode = 0; // DEFAULT
+        let mut host = TestHost::new(ftx);
+        let mut interpreter = Interpreter::default();
+
+        // Push: offset=0, length=0, scope=0x00
+        push!(interpreter, U256::from(0u64)); // scope
+        push!(interpreter, U256::from(0u64)); // length
+        push!(interpreter, U256::from(0u64)); // offset
+
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        approve(ctx);
+
+        assert_eq!(halt_result(&mut interpreter), Some(InstructionResult::InvalidFEOpcode));
+    }
+
+    #[test]
+    fn approve_scope_0x00_sets_sender_approved() {
+        let mut host = TestHost::new(make_ftx());
+        let mut interpreter = Interpreter::default();
+
+        push!(interpreter, U256::from(0u64)); // scope = 0x00 (sender)
+        push!(interpreter, U256::from(0u64)); // length
+        push!(interpreter, U256::from(0u64)); // offset
+
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        approve(ctx);
+
+        assert!(host.ftx.sender_approved);
+        assert!(!host.ftx.payer_approved);
+        assert!(host.ftx.approve_called_current_frame);
+    }
+
+    #[test]
+    fn approve_scope_0x01_sets_payer_approved() {
+        let mut ftx = make_ftx();
+        ftx.sender_approved = true; // sender must be approved first
+        let mut host = TestHost::new(ftx);
+        let mut interpreter = Interpreter::default();
+
+        push!(interpreter, U256::from(1u64)); // scope = 0x01 (payer)
+        push!(interpreter, U256::from(0u64)); // length
+        push!(interpreter, U256::from(0u64)); // offset
+
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        approve(ctx);
+
+        assert!(host.ftx.payer_approved);
+        // Payer should be set to current frame's target
+        assert_eq!(host.ftx.payer, host.ftx.frames[1].target);
+    }
+
+    #[test]
+    fn approve_scope_0x02_sets_both() {
+        let mut host = TestHost::new(make_ftx());
+        let mut interpreter = Interpreter::default();
+
+        push!(interpreter, U256::from(2u64)); // scope = 0x02 (combined)
+        push!(interpreter, U256::from(0u64)); // length
+        push!(interpreter, U256::from(0u64)); // offset
+
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        approve(ctx);
+
+        assert!(host.ftx.sender_approved);
+        assert!(host.ftx.payer_approved);
+        assert_eq!(host.ftx.payer, host.ftx.sender);
+    }
+
+    #[test]
+    fn approve_inactive_halts_opcode_not_found() {
+        let mut ftx = make_ftx();
+        ftx.active = false;
+        let mut host = TestHost::new(ftx);
+        let mut interpreter = Interpreter::default();
+
+        push!(interpreter, U256::from(0u64));
+        push!(interpreter, U256::from(0u64));
+        push!(interpreter, U256::from(0u64));
+
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        approve(ctx);
+
+        assert_eq!(halt_result(&mut interpreter), Some(InstructionResult::OpcodeNotFound));
+    }
+
+    // ── TXPARAMLOAD tests ───────────────────────────────────────────────
+
+    #[test]
+    fn txparamload_tx_type() {
+        let mut host = TestHost::new(make_ftx());
+        let mut interpreter = Interpreter::default();
+        push!(interpreter, U256::ZERO);       // in2
+        push!(interpreter, U256::from(0x00)); // in1 = tx_type
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        txparamload(ctx);
+        assert_eq!(interpreter.stack.pop().unwrap(), U256::from(0x06u64));
+    }
+
+    #[test]
+    fn txparamload_nonce() {
+        let mut host = TestHost::new(make_ftx());
+        let mut interpreter = Interpreter::default();
+        push!(interpreter, U256::ZERO);
+        push!(interpreter, U256::from(0x01));
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        txparamload(ctx);
+        assert_eq!(interpreter.stack.pop().unwrap(), U256::from(42u64));
+    }
+
+    #[test]
+    fn txparamload_sender() {
+        let mut host = TestHost::new(make_ftx());
+        let mut interpreter = Interpreter::default();
+        push!(interpreter, U256::ZERO);
+        push!(interpreter, U256::from(0x02));
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        txparamload(ctx);
+        let result = interpreter.stack.pop().unwrap();
+        let mut expected = [0u8; 32];
+        expected[12..32].copy_from_slice(&[0x11; 20]);
+        assert_eq!(result, U256::from_be_bytes(expected));
+    }
+
+    #[test]
+    fn txparamload_max_cost() {
+        let mut host = TestHost::new(make_ftx());
+        let mut interpreter = Interpreter::default();
+        push!(interpreter, U256::ZERO);
+        push!(interpreter, U256::from(0x06));
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        txparamload(ctx);
+        assert_eq!(interpreter.stack.pop().unwrap(), U256::from(999_999u64));
+    }
+
+    #[test]
+    fn txparamload_frame_count() {
+        let mut host = TestHost::new(make_ftx());
+        let mut interpreter = Interpreter::default();
+        push!(interpreter, U256::ZERO);
+        push!(interpreter, U256::from(0x09));
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        txparamload(ctx);
+        assert_eq!(interpreter.stack.pop().unwrap(), U256::from(3u64));
+    }
+
+    #[test]
+    fn txparamload_current_frame_index() {
+        let mut host = TestHost::new(make_ftx());
+        let mut interpreter = Interpreter::default();
+        push!(interpreter, U256::ZERO);
+        push!(interpreter, U256::from(0x10));
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        txparamload(ctx);
+        assert_eq!(interpreter.stack.pop().unwrap(), U256::from(1u64));
+    }
+
+    #[test]
+    fn txparamload_frame_gas_limit() {
+        let mut host = TestHost::new(make_ftx());
+        let mut interpreter = Interpreter::default();
+        push!(interpreter, U256::from(2u64)); // frame index 2
+        push!(interpreter, U256::from(0x13)); // gas_limit
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        txparamload(ctx);
+        assert_eq!(interpreter.stack.pop().unwrap(), U256::from(50_000u64));
+    }
+
+    #[test]
+    fn txparamload_frame_mode() {
+        let mut host = TestHost::new(make_ftx());
+        let mut interpreter = Interpreter::default();
+        push!(interpreter, U256::from(2u64)); // frame index 2 (SENDER)
+        push!(interpreter, U256::from(0x14)); // mode
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        txparamload(ctx);
+        assert_eq!(interpreter.stack.pop().unwrap(), U256::from(2u64)); // SENDER = 2
+    }
+
+    #[test]
+    fn txparamload_oob_frame_index_halts() {
+        let mut host = TestHost::new(make_ftx());
+        let mut interpreter = Interpreter::default();
+        push!(interpreter, U256::from(99u64)); // OOB index
+        push!(interpreter, U256::from(0x11));  // target
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        txparamload(ctx);
+        assert_eq!(halt_result(&mut interpreter), Some(InstructionResult::InvalidFEOpcode));
+    }
+
+    #[test]
+    fn txparamload_frame_status_past_frame() {
+        let mut host = TestHost::new(make_ftx());
+        let mut interpreter = Interpreter::default();
+        push!(interpreter, U256::from(0u64)); // frame 0 (past, status=Some(true))
+        push!(interpreter, U256::from(0x15));
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        txparamload(ctx);
+        assert_eq!(interpreter.stack.pop().unwrap(), U256::from(1u64)); // true
+    }
+
+    #[test]
+    fn txparamload_frame_status_current_frame_halts() {
+        let mut host = TestHost::new(make_ftx());
+        let mut interpreter = Interpreter::default();
+        push!(interpreter, U256::from(1u64)); // current frame (index == current_frame_index)
+        push!(interpreter, U256::from(0x15));
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        txparamload(ctx);
+        assert_eq!(halt_result(&mut interpreter), Some(InstructionResult::InvalidFEOpcode));
+    }
+
+    #[test]
+    fn txparamload_inactive_halts() {
+        let mut ftx = make_ftx();
+        ftx.active = false;
+        let mut host = TestHost::new(ftx);
+        let mut interpreter = Interpreter::default();
+        push!(interpreter, U256::ZERO);
+        push!(interpreter, U256::from(0x00));
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        txparamload(ctx);
+        assert_eq!(halt_result(&mut interpreter), Some(InstructionResult::OpcodeNotFound));
+    }
+
+    // ── TXPARAMSIZE tests ───────────────────────────────────────────────
+
+    #[test]
+    fn txparamsize_scalar_fields_return_32() {
+        for param_id in [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x10] {
+            let mut host = TestHost::new(make_ftx());
+            let mut interpreter = Interpreter::default();
+            push!(interpreter, U256::ZERO);
+            push!(interpreter, U256::from(param_id));
+            let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+            txparamsize(ctx);
+            assert_eq!(
+                interpreter.stack.pop().unwrap(),
+                U256::from(32u64),
+                "param_id 0x{param_id:02x} should return size 32"
+            );
+        }
+    }
+
+    #[test]
+    fn txparamsize_frame_indexed_scalars_check_bounds() {
+        for param_id in [0x11u64, 0x13, 0x14] {
+            // Valid index
+            let mut host = TestHost::new(make_ftx());
+            let mut interpreter = Interpreter::default();
+            push!(interpreter, U256::from(0u64));
+            push!(interpreter, U256::from(param_id));
+            let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+            txparamsize(ctx);
+            assert_eq!(
+                interpreter.stack.pop().unwrap(),
+                U256::from(32u64),
+                "param_id 0x{param_id:02x} with valid index should return 32"
+            );
+
+            // OOB index
+            let mut host = TestHost::new(make_ftx());
+            let mut interpreter = Interpreter::default();
+            push!(interpreter, U256::from(99u64));
+            push!(interpreter, U256::from(param_id));
+            let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+            txparamsize(ctx);
+            assert_eq!(
+                halt_result(&mut interpreter),
+                Some(InstructionResult::InvalidFEOpcode),
+                "param_id 0x{param_id:02x} with OOB index should halt"
+            );
+        }
+    }
+
+    #[test]
+    fn txparamsize_dynamic_data() {
+        let mut host = TestHost::new(make_ftx());
+        let mut interpreter = Interpreter::default();
+        // Frame 2 (SENDER mode) has 4 bytes of data
+        push!(interpreter, U256::from(2u64));
+        push!(interpreter, U256::from(0x12));
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        txparamsize(ctx);
+        assert_eq!(interpreter.stack.pop().unwrap(), U256::from(4u64));
+    }
+
+    #[test]
+    fn txparamsize_verify_data_opaque_zero() {
+        let mut host = TestHost::new(make_ftx());
+        let mut interpreter = Interpreter::default();
+        // Frame 0 (VERIFY mode) data is opaque — size 0
+        push!(interpreter, U256::from(0u64));
+        push!(interpreter, U256::from(0x12));
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        txparamsize(ctx);
+        assert_eq!(interpreter.stack.pop().unwrap(), U256::ZERO);
+    }
+
+    #[test]
+    fn txparamsize_inactive_halts() {
+        let mut ftx = make_ftx();
+        ftx.active = false;
+        let mut host = TestHost::new(ftx);
+        let mut interpreter = Interpreter::default();
+        push!(interpreter, U256::ZERO);
+        push!(interpreter, U256::from(0x00));
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        txparamsize(ctx);
+        assert_eq!(halt_result(&mut interpreter), Some(InstructionResult::OpcodeNotFound));
+    }
+
+    // ── TXPARAMCOPY tests ───────────────────────────────────────────────
+
+    #[test]
+    fn txparamcopy_copies_frame_data() {
+        let mut host = TestHost::new(make_ftx());
+        let mut interpreter = Interpreter::default();
+        // Copy frame 2's data (0xDEADBEEF, 4 bytes) to memory offset 0
+        push!(interpreter, U256::from(4u64));  // length
+        push!(interpreter, U256::ZERO);         // src_offset
+        push!(interpreter, U256::ZERO);         // dest_offset
+        push!(interpreter, U256::from(2u64));  // in2 = frame index
+        push!(interpreter, U256::from(0x12u64)); // in1 = data param
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        txparamcopy(ctx);
+        assert!(halt_result(&mut interpreter).is_none(), "should not halt");
+        let mem = interpreter.memory.slice_len(0, 4);
+        assert_eq!(&*mem, &[0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[test]
+    fn txparamcopy_zero_pads() {
+        let mut host = TestHost::new(make_ftx());
+        let mut interpreter = Interpreter::default();
+        // Copy 8 bytes from frame 2 data (only 4 bytes) — should zero-pad
+        push!(interpreter, U256::from(8u64));  // length (> data len)
+        push!(interpreter, U256::ZERO);         // src_offset
+        push!(interpreter, U256::ZERO);         // dest_offset
+        push!(interpreter, U256::from(2u64));  // frame index
+        push!(interpreter, U256::from(0x12u64)); // data param
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        txparamcopy(ctx);
+        assert!(halt_result(&mut interpreter).is_none(), "should not halt");
+        let mem = interpreter.memory.slice_len(0, 8);
+        assert_eq!(&*mem, &[0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn txparamcopy_zero_length_noop() {
+        let mut host = TestHost::new(make_ftx());
+        let mut interpreter = Interpreter::default();
+        push!(interpreter, U256::ZERO);         // length = 0
+        push!(interpreter, U256::ZERO);
+        push!(interpreter, U256::ZERO);
+        push!(interpreter, U256::from(2u64));
+        push!(interpreter, U256::from(0x12u64));
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        txparamcopy(ctx);
+        assert!(halt_result(&mut interpreter).is_none(), "zero-length copy should not halt");
+    }
+
+    #[test]
+    fn txparamcopy_inactive_halts() {
+        let mut ftx = make_ftx();
+        ftx.active = false;
+        let mut host = TestHost::new(ftx);
+        let mut interpreter = Interpreter::default();
+        push!(interpreter, U256::from(4u64));
+        push!(interpreter, U256::ZERO);
+        push!(interpreter, U256::ZERO);
+        push!(interpreter, U256::from(2u64));
+        push!(interpreter, U256::from(0x12u64));
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        txparamcopy(ctx);
+        assert_eq!(halt_result(&mut interpreter), Some(InstructionResult::OpcodeNotFound));
+    }
+
+    // ── TXPARAMCOPY gas tests ─────────────────────────────────────────
+
+    #[test]
+    fn txparamcopy_charges_copy_gas() {
+        let mut host = TestHost::new(make_ftx());
+        let mut interpreter = Interpreter::default();
+        let gas_before = interpreter.gas.remaining();
+
+        // Copy 4 bytes of frame data = 1 word → copy cost = 3 gas
+        push!(interpreter, U256::from(4u64));     // length
+        push!(interpreter, U256::ZERO);            // src_offset
+        push!(interpreter, U256::ZERO);            // dest_offset
+        push!(interpreter, U256::from(2u64));     // frame index
+        push!(interpreter, U256::from(0x12u64));  // data param
+
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        txparamcopy(ctx);
+        assert!(halt_result(&mut interpreter).is_none(), "should not halt");
+
+        let gas_after = interpreter.gas.remaining();
+        let gas_spent = gas_before - gas_after;
+        // Must include copy cost (3 gas for 1 word) + memory expansion gas.
+        // Copy cost alone = 3 gas per 32-byte word, ceil(4/32) = 1 word → 3 gas.
+        assert!(
+            gas_spent >= 3,
+            "expected at least 3 gas for copy cost, spent {gas_spent}"
+        );
+    }
+
+    #[test]
+    fn txparamcopy_copy_gas_scales_with_words() {
+        // 33 bytes → 2 words → 6 gas copy cost
+        let mut ftx = make_ftx();
+        // Give frame 2 enough data (33 bytes)
+        ftx.frames[2].data = Bytes::from(vec![0xAB; 33]);
+        let mut host = TestHost::new(ftx);
+        let mut interpreter = Interpreter::default();
+        let gas_before = interpreter.gas.remaining();
+
+        push!(interpreter, U256::from(33u64));    // length = 33 → 2 words
+        push!(interpreter, U256::ZERO);
+        push!(interpreter, U256::ZERO);
+        push!(interpreter, U256::from(2u64));
+        push!(interpreter, U256::from(0x12u64));
+
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        txparamcopy(ctx);
+        assert!(halt_result(&mut interpreter).is_none(), "should not halt");
+
+        let gas_spent = gas_before - interpreter.gas.remaining();
+        // 2 words × 3 gas = 6 gas minimum (+ memory expansion)
+        assert!(
+            gas_spent >= 6,
+            "expected at least 6 gas for 2-word copy, spent {gas_spent}"
+        );
+    }
+
+    #[test]
+    fn txparamcopy_oog_on_insufficient_gas_for_copy() {
+        use crate::interpreter::{EthInterpreter, SharedMemory, ExtBytecode, InputsImpl};
+        use primitives::hardfork::SpecId;
+
+        let mut host = TestHost::new(make_ftx());
+        // Create interpreter with only 2 gas — not enough for 3-gas copy cost
+        let mut interpreter = Interpreter::<EthInterpreter>::new(
+            SharedMemory::new(),
+            ExtBytecode::default(),
+            InputsImpl::default(),
+            false,
+            SpecId::default(),
+            2, // only 2 gas
+        );
+
+        push!(interpreter, U256::from(4u64));     // length (1 word → 3 gas copy)
+        push!(interpreter, U256::ZERO);
+        push!(interpreter, U256::ZERO);
+        push!(interpreter, U256::from(2u64));
+        push!(interpreter, U256::from(0x12u64));
+
+        let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+        txparamcopy(ctx);
+        // Should OOG because 2 gas < 3 gas copy cost
+        assert_eq!(
+            halt_result(&mut interpreter),
+            Some(InstructionResult::OutOfGas),
+            "should halt with OOG when gas < copy cost"
+        );
+    }
+
+    // ── ET4: Reserved param IDs 0x0A-0x0F return InvalidFEOpcode ────────
+
+    #[test]
+    fn reserved_param_ids_halt_txparamload() {
+        for param_id in 0x0Au64..=0x0F {
+            let mut host = TestHost::new(make_ftx());
+            let mut interpreter = Interpreter::default();
+            push!(interpreter, U256::ZERO);
+            push!(interpreter, U256::from(param_id));
+            let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+            txparamload(ctx);
+            assert_eq!(
+                halt_result(&mut interpreter),
+                Some(InstructionResult::InvalidFEOpcode),
+                "TXPARAMLOAD with reserved param_id 0x{param_id:02x} should halt"
+            );
+        }
+    }
+
+    #[test]
+    fn reserved_param_ids_halt_txparamsize() {
+        for param_id in 0x0Au64..=0x0F {
+            let mut host = TestHost::new(make_ftx());
+            let mut interpreter = Interpreter::default();
+            push!(interpreter, U256::ZERO);
+            push!(interpreter, U256::from(param_id));
+            let ctx = InstructionContext { host: &mut host, interpreter: &mut interpreter };
+            txparamsize(ctx);
+            assert_eq!(
+                halt_result(&mut interpreter),
+                Some(InstructionResult::InvalidFEOpcode),
+                "TXPARAMSIZE with reserved param_id 0x{param_id:02x} should halt"
+            );
+        }
+    }
 }
